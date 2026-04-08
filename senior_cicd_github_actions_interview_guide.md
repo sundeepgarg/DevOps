@@ -27,6 +27,21 @@ I utilize advanced deployment strategies orchestrating native Kubernetes/OpenShi
 
 ## 2. Advanced GitHub Actions Scenarios
 
+### Anatomy of a GitHub Actions Workflow
+Before diving into advanced scenarios, it's critical to be able to explain the core hierarchy of GitHub Actions during an interview. What exactly *is* a workflow?
+
+**A Workflow** is a configurable automated process that will run one or more jobs. It is defined by a YAML file checked into your repository under `.github/workflows/`. 
+
+The structural hierarchy is:
+1. **Events (Triggers):** What starts the workflow? (e.g., a push to the `main` branch, a PR creation, or a cron schedule).
+2. **Workflow:** The overarching container for the entire CI/CD process.
+3. **Jobs:** A set of steps that execute on the same runner (server). By default, multiple jobs run in parallel, but you can configure them to run sequentially (e.g., Deploy Job depends on Build Job).
+4. **Steps:** Individual tasks inside a job. A step can either run a shell terminal command (like `npm run test`) or invoke a pre-built Action (like `actions/checkout@v4`).
+
+*(See the generated `example_github_workflow.yml` file for a practical code example mapping these concepts.)*
+
+---
+
 ### Q3: You have 50 microservices needing identical CI logic. How do you implement this in GitHub Actions without code duplication?
 **Detailed Answer:**
 I would utilize **Reusable Workflows** and **Composite Actions**.

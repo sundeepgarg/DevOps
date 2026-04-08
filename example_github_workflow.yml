@@ -1,0 +1,79 @@
+# 1. WORKFLOW: 
+# The name of the entire process that will appear in the GitHub Actions UI.
+name: CI/CD Microservice Example Pipeline
+
+# 2. EVENTS (TRIGGERS):
+# This defines exactly *when* the workflow should run.
+on:
+  push:
+    branches:
+      - main            # Triggers when code is merged into the 'main' branch
+  pull_request:
+    branches:
+      - main            # Triggers when a developer opens a PR against 'main'
+  workflow_dispatch:    # Triggers manually via the GitHub UI (great for debugging)
+
+# 3. JOBS:
+# Workflows are made of one or more "jobs". Each job runs in its own isolated runner (Virtual Machine or Container).
+jobs:
+
+  # --- JOB 1: Build and Test ---
+  build-and-test:
+    name: Build & Run Unit Tests
+    runs-on: ubuntu-latest  # The server type we are borrowing from GitHub
+    
+    # 4. STEPS:
+    # A job contains a sequence of steps. They run sequentially on the *same* runner.
+    steps:
+      # Step A: Use a pre-built Action to pull our Git repository code down onto the runner
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      # Step B: Use a pre-built Action to install a runtime (e.g., Python, Node, Java)
+      - name: Setup Node.js Environment
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm' # Automatically caches dependencies to speed up future runs!
+
+      # Step C: Run a standard shell command
+      - name: Install Dependencies
+        run: npm ci
+
+      # Step D: Run another shell command
+      - name: Execute Test Suite
+        run: npm run test
+
+      # Step E: Another shell command, but with Environment Variables passed in
+      - name: Run Build
+        env:
+          NODE_ENV: production
+        run: npm run build
+
+
+  # --- JOB 2: Deploy to OpenShift ---
+  # Notice: This is a separate block. By default, it would run at the EXACT same time as "build-and-test".
+  # That would be bad, so we use "needs" to make them sequential.
+  deploy-to-cluster:
+    name: Deploy to Kubernetes/OpenShift
+    runs-on: ubuntu-latest
+    needs: build-and-test # CRITICAL: This Wait until the "build-and-test" job passes 100% successfully.
+    
+    # We only want to deploy if we are on the main branch (not a PR)
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout Code Again
+        uses: actions/checkout@v4
+
+      # Example of how you would securely log into an enterprise cluster
+      - name: Authenticate to OpenShift via OIDC
+        uses: redhat-actions/oc-login@v1
+        with:
+          openshift_server_url: ${{ secrets.OPENSHIFT_SERVER }}
+          openshift_token: ${{ secrets.OPENSHIFT_TOKEN }} # Or preferably use OIDC here!
+
+      - name: Trigger Rollout
+        run: |
+          echo "Deploying newly built image to the cluster..."
+          # oc rollout restart deployment/my-api-service
