@@ -1,0 +1,74 @@
+name: Deploy AWS Data Pipeline Infrastructure
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  TERRAFORM_DIR: ./terraform
+
+jobs:
+  terraform-deploy:
+    name: Terraform Deploy
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.0"
+
+      - name: Terraform Init
+        id: init
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: terraform init
+
+      - name: Terraform Format Check
+        id: fmt
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: terraform fmt -check || echo "Formatting issues found, consider running terraform fmt locally"
+
+      - name: Terraform Validate
+        id: validate
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: terraform validate -no-color
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: terraform plan -no-color
+        continue-on-error: false
+
+      - name: Terraform Apply
+        id: apply
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: terraform apply -auto-approve -input=false
+
+      # Example step on how to upload the script to the provisioned bucket
+      - name: Upload Glue Script to S3 (Post-Apply)
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          # Fetch dynamic bucket name output from terraform
+          cd ${{ env.TERRAFORM_DIR }}
+          SCRIPTS_BUCKET=$(terraform output -raw scripts_bucket_name)
+          cd ..
+          
+          # Upload spark_etl.py to the scripts bucket
+          aws s3 cp src/glue/spark_etl.py s3://${SCRIPTS_BUCKET}/spark_etl.py
