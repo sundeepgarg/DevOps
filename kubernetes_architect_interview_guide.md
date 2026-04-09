@@ -102,3 +102,43 @@ A **NetworkPolicy** operates at L3/L4 via the CNI plugin (e.g., Calico). To crea
 1. I implement a "Default Deny-All" policy in every namespace. This drops all ingress and egress traffic.
 2. I then punch explicit holes in the firewall using subsequent NetworkPolicies. For example, explicitly allowing frontend-pods to talk *only* to backend-pods on port 8080, and backend-pods *only* to the database on port 5432.
 3. This creates namespace isolation, preventing a compromised container in Team A's namespace from pivoting to attack Team B's namespace.
+
+---
+
+## 6. OpenShift Architecture: Provisioning & Hardware Add-ons
+
+### Q12: How do you architect and provision a new OpenShift Container Platform (OCP) cluster at an enterprise scale?
+**Detailed Answer:**
+In OpenShift 4.x, the entire architecture shifted to become self-hosting and immutable through Red Hat Enterprise Linux CoreOS (RHCOS). I approach installation in two main ways depending on enterprise network restrictions:
+
+1. **Installer Provisioned Infrastructure (IPI):** 
+   - The fastest method. The `openshift-install` binary talks directly to cloud APIs (AWS, vSphere) and provisions all the underlying networking, load balancers, routing, and VMs *for* you. Ensure you tailor the `install-config.yaml` to specify the machine types and topologies.
+2. **User Provisioned Infrastructure (UPI):** 
+   - Used in highly restricted, air-gapped data centers. We bring our own VMs, load balancers, and DNS. OpenShift just installs the software on top of it.
+   
+**The Bootstrapping Process you must know:**
+- To initialize the cluster, you generate **Ignition configs** (which completely replaced Kickstart scripts). 
+- A temporary "Bootstrap" node boots up with the initial Ignition config. It creates a temporary standalone Kubernetes control plane.
+- The 3 Master nodes boot and join the temporary cluster. They form an `etcd` quorum.
+- The Master nodes then transition to taking over the control plane duties. Once they stabilize, the temporary Bootstrap node destroys itself.
+- Finally, Worker nodes are spun up dynamically by the OpenShift `Machine API` scaling out compute capacity to handle the workload.
+
+### Q13: Your AI/ML team requires dynamic GPU provisioning in your OpenShift cluster. How do you architect GPU node inclusion and pod scheduling?
+**Detailed Answer:**
+Adding GPUs to a Kubernetes/OpenShift cluster requires multiple complex driver layers. Red Hat has vastly simplified this using the Kubernetes **Operator Pattern**. Here is the exact architecture flow:
+
+1. **Provision the Hardware via Machinesets:**
+   - I would create a new `MachineSet` in OpenShift specifying an EC2 instance type with GPU attachments (like AWS `p3.2xlarge` or `g4dn.xlarge`). OpenShift’s Machine API automatically provisions the VM from AWS and joins it to the cluster as a worker node.
+2. **Deploy the Node Feature Discovery (NFD) Operator:**
+   - The NFD operator runs a DaemonSet across the cluster to continuously inspect hardware.
+   - When the new GPU node joins, NFD scans the PCI-e buses, detects the NVIDIA hardware, and dynamically tags that specific node with Kubernetes labels (e.g., `feature.node.kubernetes.io/pci-10de.present=true`).
+3. **Deploy the NVIDIA GPU Operator:**
+   - Relying on the labels placed by NFD, the NVIDIA GPU Operator springs into action. It automates the installation of everything required. It deploys:
+     - The NVIDIA Drivers (Runs in a special privileged container).
+     - The Kubernetes Device Plugin for GPU.
+     - The Container Toolkit (to expose GPU drivers inside user containers).
+4. **Developer Workload Scheduling:**
+   - The ML developers add a single line to their Pod/Deployment manifest under the `resources.requests/limits` block: `nvidia.com/gpu: 1`. 
+   - Because the NVIDIA plugin exposed the GPU capacity to the kubelet, the `kube-scheduler` sees the restriction and natively forces the ML pod onto the appropriate hardware node.
+
+*This declarative approach using Operators means zero manual driver installation on base Linux OS systems, vastly lowering operational overhead.*
