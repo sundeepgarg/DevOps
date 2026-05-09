@@ -1,1 +1,16 @@
 minikube start --driver=docker --container-runtime=docker --gpus=all
+
+Install the NVIDIA Device Plugin
+kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/master/nvidia-device-plugin.yml
+
+Verify the GPU is visible to Kubernetes
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-test
+spec:
+  containers:
+  - name: cuda-container
+    image: nvidia/cuda:11.8.0-base-ubuntu20.04
+    command: ["nvidia-smi"]
+  restartPolicy: OnFailure
