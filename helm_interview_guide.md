@@ -143,3 +143,163 @@ resources:
   {{- toYaml .Values.resources | nindent 2 }}
 ```
 This takes the `resources` YAML tree from `values.yaml`, converts it to a string cleanly, and forcibly indents it by 2 spaces, guaranteeing valid YAML in the final rendered Kubernetes manifest.
+
+---
+
+## 6. Advanced Scenario-Based Questions
+
+### Q6: You have a Helm chart that is deployed to both OpenShift and vanilla Kubernetes. OpenShift requires a specific SecurityContextConstraints (SCC). How do you handle this in one chart?
+
+**Detailed Answer:**
+Use a conditional template block that renders OpenShift-specific resources only when a flag is set:
+
+In `values.yaml`:
+```yaml
+openshift:
+  enabled: false
+```
+
+In `templates/openshift-scc.yaml`:
+```yaml
+{{- if .Values.openshift.enabled }}
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: {{ include "mychart.fullname" . }}-scc
+allowPrivilegedContainer: false
+runAsUser:
+  type: MustRunAsNonRoot
+{{- end }}
+```
+
+Deploy to OpenShift: `helm upgrade --install my-app ./chart -f values-openshift.yaml` where `values-openshift.yaml` sets `openshift.enabled: true`.
+
+This keeps one chart, no code duplication, and OpenShift-specific resources are invisible on Kubernetes clusters.
+
+### Q7: Your Helm chart deploys a database migration Job before the main Deployment starts. The Job is flaky — sometimes it fails and leaves the release in a broken state. How do you handle this reliably?
+
+**Detailed Answer:**
+Use Helm **hooks** to sequence operations and control failure behavior:
+
+```yaml
+# templates/db-migrate-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migrate
+  annotations:
+    "helm.sh/hook": pre-upgrade,pre-install
+    "helm.sh/hook-weight": "-5"         # Lower = earlier; run before other pre-hooks
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3                        # Retry 3 times before marking Job as failed
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: myapp:{{ .Values.image.tag }}
+          command: ["python", "manage.py", "migrate"]
+```
+
+Behavior:
+- `pre-upgrade,pre-install`: Job runs before any other resources are deployed
+- `hook-delete-policy: before-hook-creation,hook-succeeded`: Cleans up old Job on next deploy; keeps failed Job for debugging
+- If the Job fails (all retries exhausted), `helm upgrade` rolls back automatically
+- `hook-weight` controls ordering when multiple hooks exist
+
+### Q8: How do you version a Helm chart and what should trigger a version bump?
+
+**Detailed Answer:**
+`Chart.yaml` has two version fields:
+- **`version`**: The chart version (SemVer). Bump when the chart packaging changes — new template, new default, changed hook.
+- **`appVersion`**: The version of the application inside the chart. Bump when the application image/binary changes. This is metadata only — does not affect Helm upgrade logic.
+
+```yaml
+# Chart.yaml
+version: 2.1.0       # Chart packaging version
+appVersion: "1.5.3"  # Application version (informational)
+```
+
+**Versioning rules (senior practice):**
+- **Patch** (`2.1.0 → 2.1.1`): Bug fix in template, no behavioral change for users
+- **Minor** (`2.1.0 → 2.2.0`): New optional feature, backwards-compatible new value
+- **Major** (`2.1.0 → 3.0.0`): Breaking change — renamed value key, removed template, changed default that affects existing deployments
+
+In CI/CD: bump `appVersion` automatically from the Docker image tag. Bump `version` manually (or via semantic-release based on conventional commits).
+
+### Q9: A Helm release is stuck in "pending-upgrade" state. How do you recover?
+
+**Detailed Answer:**
+This happens when a previous `helm upgrade` was interrupted mid-flight (network cut, CI job killed). Helm stores release state as Kubernetes Secrets.
+
+```bash
+# 1. Check current release state
+helm list --all -n my-namespace | grep my-release
+# Shows: my-release  pending-upgrade
+
+# 2. View the release history
+helm history my-release -n my-namespace
+# REVISION  STATUS           DESCRIPTION
+# 1         superseded       Install complete
+# 2         pending-upgrade  Upgrade in progress
+
+# 3. Roll back to the last successful revision
+helm rollback my-release 1 -n my-namespace
+
+# 4. Verify
+helm status my-release -n my-namespace
+```
+
+If `helm rollback` also fails (corrupted state), manually delete the pending release Secret:
+```bash
+kubectl get secrets -n my-namespace | grep my-release
+kubectl delete secret sh.helm.release.v1.my-release.v2 -n my-namespace
+```
+This removes the pending revision from history. Helm will now see the last good state.
+
+### Q10: You are using Helm in a GitOps workflow with ArgoCD. What is the recommended pattern for managing multiple environments?
+
+**Detailed Answer:**
+The recommended pattern separates the **chart source** from the **environment config**:
+
+```
+├── charts/                     # Git repo 1: Chart source (no environment values)
+│   └── myapp/
+│       ├── Chart.yaml
+│       ├── values.yaml         # Default values only
+│       └── templates/
+
+└── gitops/                     # Git repo 2: ArgoCD Application manifests
+    ├── dev/
+    │   └── myapp-app.yaml      # ArgoCD Application pointing to chart + dev values
+    ├── staging/
+    │   └── myapp-app.yaml
+    └── prod/
+        └── myapp-app.yaml
+```
+
+**ArgoCD Application with environment values:**
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: myapp-prod
+spec:
+  source:
+    repoURL: https://github.com/org/charts
+    targetRevision: v2.1.0       # Pin chart version
+    path: myapp
+    helm:
+      valueFiles:
+        - values-prod.yaml       # In the chart repo, or a separate values repo
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prod
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+Key principle: **never use `targetRevision: HEAD`** in production — always pin to a chart version. Promotions are Git commits changing the `targetRevision`, reviewed via PR.
