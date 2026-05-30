@@ -680,6 +680,255 @@ No single service guarantees 99.99% — it comes from the combination of redunda
 
 ---
 
+## Compute Decision: Azure Functions vs App Service vs AKS
+
+### The Core Question Interviewers Ask
+
+**"When would you choose Azure Functions over AKS for a new workload on Azure?"**
+
+---
+
+### Comparison Table
+
+| Factor | Azure Functions | App Service | AKS |
+|---|---|---|---|
+| **Infrastructure management** | Zero — fully managed | Low — managed runtime, no OS | High — cluster, nodes, upgrades |
+| **Scaling** | Instant, 0 → 200 instances (Consumption) | Auto-scale 1–30 instances | HPA + Cluster Autoscaler (~5-10 min for nodes) |
+| **Cost model** | Per invocation + duration (₹0 when idle) | Per App Service Plan (always on) | EC2/VM node cost always running |
+| **Cold start** | 200ms–3s (.NET), 1–5s (Python/Java) | None (always warm) | None (pods running) |
+| **Max execution time** | **10 minutes** (Consumption), **unlimited** (Premium/Dedicated) | Unlimited | Unlimited |
+| **Stateful workloads** | No (Durable Functions for workflow state only) | Limited (sticky sessions) | Yes — PVCs, StatefulSets |
+| **GPU workloads** | No | No | Yes — GPU node pools |
+| **Long-running processes** | No (Consumption plan) / Yes (Premium plan) | Yes | Yes |
+| **Container support** | Yes — container-based Functions | Yes — custom containers | Yes — any container |
+| **Operational complexity** | Very low | Low | High |
+| **K8s expertise required** | No | No | Yes |
+| **Portability** | Azure only | Azure only | Any Kubernetes |
+| **Custom networking (VNet)** | Premium plan required ($$$) | Supported | Full control |
+| **Min monthly cost** | $0 (Consumption) | ~$13/month (B1) | ~$140/month (3×B2s nodes) |
+
+---
+
+### When to Use Azure Functions
+
+**Best for:**
+- **Event-driven, short-lived tasks** — Blob uploaded → process it, Service Bus message → handle it
+- **Unpredictable / spiky traffic** — cost is $0 when idle, scales instantly on trigger
+- **HTTP APIs with low/moderate traffic** — < 1M calls/month → practically free
+- **Scheduled jobs** — Timer trigger replaces cron daemons entirely
+- **Integration glue** — Event Grid trigger → transform → write to Cosmos DB
+- **Prototypes and MVPs** — deploy in minutes, no infrastructure setup
+
+**Azure Function trigger types (know these for interviews):**
+```
+HTTP trigger         → REST API endpoint
+Timer trigger        → Cron schedule (0 */5 * * * * = every 5 min)
+Blob trigger         → Fires when blob created/modified in Storage
+Queue trigger        → Service Bus or Storage Queue message
+Event Hub trigger    → High-throughput event stream consumer
+Event Grid trigger   → Any Azure event (resource changes, custom events)
+Cosmos DB trigger    → Change feed — fires when document changes
+```
+
+**Consumption vs Premium vs Dedicated Plan:**
+
+| Plan | Cold Start | VNet | Max Duration | Cost |
+|---|---|---|---|---|
+| Consumption | Yes (200ms–5s) | No | 10 min | Pay per use |
+| Premium | No (pre-warmed) | Yes | Unlimited | ~$150/month min |
+| Dedicated (App Service) | No | Yes | Unlimited | App Service Plan cost |
+
+> Use **Premium plan** when: you need VNet integration, no cold starts, or execution > 10 min.
+
+**Real example:**
+```
+Image moderation pipeline:
+  User uploads photo → Blob Storage → Blob trigger → Azure Function
+    → Call Azure Computer Vision API (2 sec)
+    → If flagged → write to Cosmos DB + send alert via Service Bus
+    → Delete original blob
+  
+  Azure Functions is perfect: event-driven, < 10 seconds, scales to thousands
+  of concurrent uploads, zero cost during quiet periods
+```
+
+**Do NOT use Azure Functions for:**
+- Execution > 10 minutes on Consumption plan (use Premium or AKS)
+- GPU/ML workloads
+- WebSocket connections (use SignalR Service instead)
+- Workloads needing shared in-memory state between invocations
+- Complex microservices that need sidecar patterns
+
+---
+
+### When to Use Azure App Service
+
+**Best for:**
+- **Traditional web apps and APIs** — full-featured HTTP apps that run 24/7
+- **Teams without container or K8s knowledge** — PaaS, just deploy code
+- **Apps needing built-in features** — authentication, SSL, custom domains, deployment slots
+- **Moderate steady traffic** — always-on REST APIs, web frontends
+- **.NET, Java, Node.js, Python apps** — native runtime support, no Docker needed
+
+**Key advantages over AKS:**
+
+1. **Deployment Slots** — built-in blue/green and canary without any tooling
+   ```bash
+   az webapp deployment slot swap --name my-api --slot staging
+   # Atomic swap in < 30 seconds. Instant rollback = swap back.
+   ```
+
+2. **Managed runtime patching** — Azure handles OS + runtime updates
+   - On AKS: you patch nodes, upgrade Kubernetes version, manage container base images
+
+3. **Auto-scale simplicity** — 3 clicks in portal or 3 lines of CLI
+   ```bash
+   az monitor autoscale create --resource my-plan \
+     --min-count 2 --max-count 20 --count 2
+   az monitor autoscale rule create --condition "CpuPercentage > 70 avg 5m" --scale out 2
+   ```
+
+4. **Cost efficiency for simple apps** — B2 plan (~$26/month) runs multiple apps on same plan
+   - AKS: minimum ~$140/month for 3 nodes before running a single pod
+
+5. **Zero Kubernetes operational overhead** — no `kubectl`, no Helm, no ingress controllers
+
+**App Service Plan tiers (know for interviews):**
+
+| Tier | Use case | Key features |
+|---|---|---|
+| Free / Shared (F1/D1) | Dev/test only | Shared infra, no custom domain |
+| Basic (B1-B3) | Low-traffic prod apps | No auto-scale, no deployment slots |
+| Standard (S1-S3) | Production | Auto-scale, 5 deployment slots |
+| Premium (P1-P3) | High performance | More CPU/RAM, 20 slots, VNet integration |
+| Isolated (I1-I3) | Compliance/isolation | Dedicated VNet, no shared infra |
+
+---
+
+### When to Use AKS
+
+**Best for:**
+- **Large microservices ecosystems** (20+ services) — single control plane for all
+- **ML / AI workloads** — GPU nodes, KServe model serving, KEDA queue-based scaling
+- **Portability requirements** — same Helm charts deploy to AKS, EKS, OpenShift
+- **Advanced networking** — Istio/Cilium service mesh, network policies, mTLS between services
+- **Stateful workloads** — anything needing persistent volumes, StatefulSets
+- **Teams with Kubernetes expertise** — investment pays off at scale
+
+**Advantages over Functions + App Service:**
+- Full Kubernetes ecosystem (Helm, ArgoCD, Keda, Istio, Cert-Manager, OPA Gatekeeper)
+- Sidecar containers — Istio proxies, Fluentd log collectors, Vault agent injector
+- GPU support — ML training and inference workloads
+- Pod scheduling control — affinity, anti-affinity, topology spread, taints/tolerations
+- Cost-efficient at scale — Spot/Preemptible nodes 60-80% cheaper
+- Multi-tenancy — namespace isolation, ResourceQuotas per team
+
+**AKS-specific cost optimisers:**
+```yaml
+# Spot node pool — 60-80% cost reduction for interruptible workloads
+az aks nodepool add \
+  --resource-group my-rg \
+  --cluster-name my-aks \
+  --name spotnodes \
+  --priority Spot \
+  --eviction-policy Delete \
+  --spot-max-price -1 \        # pay market price
+  --node-vm-size Standard_D4s_v3
+
+# Karpenter (or AKS equivalent) — provision right-sized nodes on demand
+# instead of pre-provisioned node pools
+```
+
+---
+
+### Cost Comparison (Azure, UK South, approximate)
+
+```
+Scenario: API handling 5M requests/month, avg 500ms, 256MB memory
+
+Azure Functions (Consumption):
+  Executions: 5M × $0.0000002 = $1.00
+  Duration:   5M × 0.5s × 0.25GB × $0.000016/GB-sec = $10.00
+  Total: ~$11/month  ← cheapest for this volume
+
+App Service (Standard S2 — 2 vCPU, 3.5GB):
+  ~$97/month fixed
+  Handles ~200 req/sec comfortably
+  Better choice if running 24/7 steady traffic
+
+AKS (3 × Standard_D2s_v3 nodes):
+  ~$210/month fixed (nodes only)
+  + ~$72/month AKS management fee (Standard tier)
+  Total: ~$282/month minimum
+  Better choice when running 10+ services sharing the cluster
+
+Breakeven analysis:
+  Functions > App Service at ~80M invocations/month
+  App Service > AKS when running 3+ always-on services on same plan
+```
+
+---
+
+### Decision Flowchart
+
+```
+Is workload event-driven? (triggered by blob, queue, timer, HTTP event)
+  YES → Azure Functions (unless > 10 min execution or needs VNet)
+
+Is traffic sporadic or unpredictable?
+  YES → Azure Functions (scales to zero, no idle cost)
+
+Is it a simple web app / API, team has no K8s expertise?
+  YES → App Service (simplest path, built-in slots, managed runtime)
+
+Does the app need deployment slots (blue/green) with zero Kubernetes overhead?
+  YES → App Service
+
+Does the workload need GPU / ML inference?
+  YES → AKS (GPU node pools)
+
+Is this a complex microservices system (20+ services)?
+  YES → AKS (single control plane, Helm, ArgoCD)
+
+Do you need multi-cloud portability or OpenShift migration path?
+  YES → AKS (Kubernetes is portable)
+
+Do you need service mesh (mTLS, traffic splitting between services)?
+  YES → AKS + Istio / Cilium
+
+Is cost the primary concern and team is small?
+  LOW traffic  → Functions
+  MEDIUM traffic → App Service
+  HIGH traffic with many services → AKS (amortised over services)
+```
+
+---
+
+### Hybrid Pattern — Use All Three on Azure
+
+Real enterprise architectures combine all three:
+
+```
+Azure Front Door (global CDN + WAF)
+    │
+    ├──▶ Azure Functions          ← webhooks, scheduled jobs, event processing
+    │      (Consumption plan)       Blob trigger, Timer, Service Bus consumer
+    │
+    ├──▶ App Service               ← customer-facing web app, simple REST APIs
+    │      (Standard tier)          Marketing site, auth service, admin portal
+    │
+    └──▶ AKS                       ← ML model serving (KServe + GPU)
+           (3-zone cluster)          Core platform microservices
+                                     Data processing pipelines
+                                     Services needing sidecar / service mesh
+
+Service Bus ──▶ Functions          ← async processing
+Event Grid  ──▶ Functions          ← Azure resource change events  
+Cosmos DB change feed ──▶ Functions ← real-time data sync triggers
+```
+
+---
+
 ## Quick Reference — Azure Services at a Glance
 
 | Problem | Azure Service |

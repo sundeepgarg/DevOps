@@ -586,6 +586,184 @@ Use AWS Step Functions for orchestrating saga steps with built-in retry and comp
 
 ---
 
+## Compute Decision: Lambda vs ECS Fargate vs EKS
+
+### The Core Question Interviewers Ask
+
+**"Your team needs to deploy a new service. When do you choose Lambda over EKS?"**
+
+The answer is never a single right answer — it depends on the workload profile. Here is the decision framework.
+
+---
+
+### Comparison Table
+
+| Factor | Lambda | ECS Fargate | EKS |
+|---|---|---|---|
+| **Infrastructure management** | Zero — AWS manages everything | Low — no EC2, but you manage tasks | High — you manage cluster, nodes, upgrades |
+| **Scaling** | Automatic, 0 to 10,000 concurrent in seconds | Auto-scales in ~60-90 sec | HPA ~1-2 min, Cluster Autoscaler ~5-10 min |
+| **Cost model** | Per invocation + duration (₹0 when idle) | Per vCPU/memory per second | EC2 node cost always running |
+| **Cold start** | 100ms–2s depending on runtime | ~15-30 sec (new task) | ~2-5 min (new node needed) |
+| **Max execution time** | **15 minutes** (hard limit) | Unlimited | Unlimited |
+| **Stateful workloads** | No — ephemeral, no local disk | Limited (EFS mount possible) | Yes — PVCs, StatefulSets |
+| **Container support** | Yes — Lambda container images (up to 10GB) | Yes — any Docker image | Yes — any Docker image |
+| **Custom runtimes** | Limited (provided runtimes or container) | Full control | Full control |
+| **GPU workloads** | No | No | Yes — GPU node pools |
+| **Long-running processes** | No (15 min limit) | Yes | Yes |
+| **VPC networking** | Yes but adds ~400ms cold start | Yes — native VPC | Yes — native VPC |
+| **Operational complexity** | Very low | Medium | High |
+| **K8s expertise required** | No | No | Yes |
+| **Portability** | AWS only | AWS only | Runs on any K8s |
+| **Startup cost** | $0 | ~$0.04/hour minimum | ~$0.10–$0.30/hour per node minimum |
+
+---
+
+### When to Use Lambda
+
+**Best for:**
+- **Event-driven, short-lived tasks** — S3 object uploaded → process it, SQS message → handle it
+- **Irregular / unpredictable traffic** — peaks at noon, quiet at 3am — you pay only for peaks
+- **Scheduled jobs** — cron-style tasks (EventBridge + Lambda replaces cron daemons)
+- **Glue code** — fan-out, format conversion, routing between services
+- **Prototyping** — zero infrastructure to set up, deploy in minutes
+- **Very low traffic APIs** — < 1M requests/month fits in free tier
+
+**Real example:**
+```
+Image upload flow:
+  User uploads photo → S3 → S3 event → Lambda → resize image → store thumbnail → DynamoDB
+  
+  Lambda is perfect: triggered by event, runs < 5 seconds, scales to 10,000 concurrent
+  automatically, zero cost when no uploads happening
+```
+
+**Hard limitations — do NOT use Lambda for:**
+- Execution time > 15 minutes (use ECS/EKS/Step Functions)
+- Large memory workloads > 10GB RAM
+- GPU inference / ML training
+- WebSocket long-lived connections
+- Workloads requiring shared in-memory state between invocations
+
+---
+
+### When to Use ECS Fargate
+
+**Best for:**
+- **Containerised microservices** without the operational overhead of Kubernetes
+- **Teams without K8s expertise** — ECS is simpler to operate
+- **Batch processing** — longer running than Lambda, triggered by schedule or queue
+- **APIs with steady but moderate traffic** — always-on but no need for K8s power
+- **Lift-and-shift containers** — moving existing Docker containers to AWS quickly
+
+**Advantages over EKS:**
+- No control plane to manage (EKS charges $0.10/hour for control plane)
+- No worker node patching
+- Simpler IAM model — task IAM role instead of IRSA (IAM Roles for Service Accounts)
+- Simpler networking — no CNI plugins to configure
+- Native AWS service — deep integration with ALB, CloudWatch, Secrets Manager
+
+**Advantages over Lambda:**
+- No 15-minute execution limit
+- Consistent latency — no cold starts (task is always running)
+- Can run long-lived processes (websockets, queue consumers, background jobs)
+- More memory and CPU options (up to 120 vCPU, 240 GB RAM per task)
+
+---
+
+### When to Use EKS
+
+**Best for:**
+- **Large microservices ecosystems** (50+ services) where operational consistency matters
+- **ML / AI workloads** — GPU nodes, KServe model serving, Kubeflow pipelines
+- **Multi-cloud or hybrid portability** — same Kubernetes manifests work on OpenShift, GKE, AKS
+- **Advanced traffic management** — Istio service mesh, fine-grained canary, mTLS
+- **Stateful workloads** — databases, message brokers, anything needing persistent storage
+- **Teams with existing K8s expertise**
+- **Complex scheduling requirements** — affinity, anti-affinity, node selectors, taints/tolerations
+
+**Advantages over Lambda + Fargate:**
+- Full Kubernetes ecosystem (Helm, ArgoCD, Karpenter, Istio, KEDA, OPA)
+- Cost-efficient at scale — EC2 spot instances can be 70-80% cheaper than on-demand
+- GPU support for ML workloads
+- Sidecar containers (service mesh proxies, log collectors, security agents)
+- StatefulSets for databases and message brokers
+- Pod topology spread — control exactly where workloads land
+
+**Cost comparison (rough, us-east-1):**
+
+```
+1,000,000 Lambda invocations (avg 500ms, 256MB) per month:
+  = ~$2.10/month  ← very cheap for low volume
+
+ECS Fargate running 24/7 (2 tasks, 0.5 vCPU, 1GB each):
+  = ~$29/month    ← always-on minimum
+
+EKS cluster (3 × m5.large nodes) 24/7:
+  = ~$220/month   ← higher fixed cost, but handles much more workload
+
+Breakeven:
+  Lambda becomes MORE expensive than Fargate at ~15M invocations/month
+  Fargate becomes MORE expensive than EKS at ~20+ tasks always running
+```
+
+---
+
+### Decision Flowchart
+
+```
+Is execution time > 15 minutes?
+  YES → ECS Fargate or EKS
+
+Does the workload need GPU?
+  YES → EKS (GPU node pools)
+
+Is it event-driven (S3, SQS, EventBridge, cron)?
+  YES → Lambda (unless > 15 min)
+
+Is traffic highly irregular (quiet hours + sharp spikes)?
+  YES → Lambda (scale to zero, no cost when idle)
+
+Do you have 50+ microservices or need K8s ecosystem (Istio, ArgoCD)?
+  YES → EKS
+
+Does the team have K8s expertise?
+  NO → Lambda (simple) or ECS Fargate (medium complexity) 
+  YES → EKS
+
+Is this a simple containerised web app / API?
+  YES → ECS Fargate (simpler than EKS, always-on)
+
+Is this an ML / AI serving workload?
+  YES → EKS + KServe
+```
+
+---
+
+### Hybrid Pattern — Use All Three Together
+
+Most mature AWS architectures use all three in the same system:
+
+```
+Frontend CDN (CloudFront)
+    │
+    ▼
+API Gateway → Lambda           ← low-traffic, event-driven endpoints
+                                  (webhooks, notifications, cron jobs)
+    │
+    ▼
+ALB → ECS Fargate              ← steady-traffic REST APIs, auth service
+                                  (always-on, moderate scale)
+    │
+    ▼
+EKS                            ← ML model serving (KServe + GPU),
+                                  complex stateful services, data pipelines
+
+SQS → Lambda                   ← async processing (emails, thumbnails)
+DynamoDB Streams → Lambda       ← change data capture, triggers
+```
+
+---
+
 ## Quick Reference — AWS Services at a Glance
 
 | Problem | AWS Service |
